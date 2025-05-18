@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Jupyter/Notebook
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Streamlit
+.streamlit/
+
+# Matplotlib
+*.png
+
+# VSCode
+.vscode/
+
+# Logs
+*.log
+
+# OS generated
+Thumbs.db
+ehthumbs.db
+Icon?
+.DS_Store
+
+# Pytest
+.cache/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+
+# Pyre type checker
+.pyre/ 
