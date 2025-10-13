@@ -45,8 +45,39 @@ def normalize_chase(df):
             for col in ['category', 'description']:
                 if col not in df:
                     df[col] = None
+            # Check for date parsing failures
+            invalid_dates = df['date'].isna().sum()
+            if invalid_dates > 0:
+                st.warning(f"Warning: {invalid_dates} transactions have invalid dates in Chase file")
             return df[['date', 'description', 'category', 'amount', 'account']]
-    raise ValueError("No valid Chase mapping found")
+    
+    # If no exact mapping found, try flexible approach
+    st.warning(f"No exact Chase mapping found. Available columns: {list(df.columns)}")
+    st.warning("Trying flexible mapping...")
+    
+    # Create flexible mapping
+    flexible_map = {}
+    for col in df.columns:
+        if 'date' in col.lower():
+            flexible_map[col] = 'date'
+        elif 'amount' in col.lower():
+            flexible_map[col] = 'amount'
+        elif 'description' in col.lower():
+            flexible_map[col] = 'description'
+        elif 'category' in col.lower():
+            flexible_map[col] = 'category'
+    
+    if 'date' in flexible_map.values() and 'amount' in flexible_map.values():
+        df = df.rename(columns=flexible_map)
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce') * -1
+        df['account'] = 'Chase'
+        for col in ['category', 'description']:
+            if col not in df:
+                df[col] = None
+        return df[['date', 'description', 'category', 'amount', 'account']]
+    
+    raise ValueError(f"No valid Chase mapping found. Columns: {list(df.columns)}")
 
 def normalize_capone(df):
     df = df.rename(columns=CAPONE_MAP)
@@ -58,17 +89,28 @@ def normalize_capone(df):
     for col in ['category', 'description']:
         if col not in df:
             df[col] = None
+    # Check for date parsing failures
+    invalid_dates = df['date'].isna().sum()
+    if invalid_dates > 0:
+        st.warning(f"Warning: {invalid_dates} transactions have invalid dates in Capital One file")
     return df[['date', 'description', 'category', 'amount', 'account']]
 
 # --- Bank detection ---
 def detect_bank(df):
+    columns = df.columns.tolist()
     # Chase: either 'Trans Date' or 'Transaction Date' + 'Amount' + 'Description'
-    if  "Amount" in df.columns:
+    if "Amount" in columns and ("Trans Date" in columns or "Transaction Date" in columns):
         return "chase"
-    elif "Debit" in df.columns:
+    elif "Debit" in columns and "Transaction Date" in columns:
         return "capone"
     else:
-        return "unknown"
+        # More flexible detection - check for common patterns
+        if "Amount" in columns and any("Date" in col for col in columns):
+            return "chase"  # Try Chase format first
+        elif "Debit" in columns or "Credit" in columns:
+            return "capone"  # Try Capital One format
+        else:
+            return "unknown"
 
 normalizers = {
     "chase": normalize_chase,
@@ -107,20 +149,24 @@ page = st.sidebar.radio("Page", ["Dashboard", "Spending Over Time"])
 
 if uploaded_files:
     dfs = []
+    st.info(f"Processing {len(uploaded_files)} files...")
     for file in uploaded_files:
         df = pd.read_csv(file)
         bank = detect_bank(df)
+        st.info(f"File {file.name}: detected as {bank} bank (columns: {list(df.columns)})")
         if bank in normalizers:
             try:
                 norm_df = normalizers[bank](df)
                 norm_df['grouped_category'] = norm_df['category'].map(CATEGORY_MAP).fillna('Other')
                 dfs.append(norm_df)
+                st.success(f"Successfully processed {file.name}: {len(norm_df)} transactions")
             except Exception as e:
-                st.warning(f"Error normalizing {file.name}: {e}")
+                st.error(f"Error normalizing {file.name}: {e}")
         else:
-            st.warning(f"Unknown format for file: {file.name}")
+            st.error(f"Unknown format for file: {file.name}")
     if dfs:
         all_data = pd.concat(dfs, ignore_index=True)
+        st.success(f"Combined {len(dfs)} files into {len(all_data)} total transactions")
         # Filter out payment/reversal rows
         def is_payment_row(description):
             if pd.isna(description):
@@ -174,20 +220,60 @@ if uploaded_files:
             # --- Filtering UI ---
             if not all_data.empty:
                 # Date range filter
-                date_min, date_max = all_data['date'].min(), all_data['date'].max()
-                date_range = st.sidebar.date_input("Date range", [date_min, date_max])
+                valid_dates = all_data['date'].dropna()
+                if not valid_dates.empty:
+                    date_min, date_max = valid_dates.min(), valid_dates.max()
+                    date_range = st.sidebar.date_input("Date range", [date_min, date_max])
+                else:
+                    st.warning("No valid dates found in uploaded files")
+                    date_range = [pd.Timestamp.now().date(), pd.Timestamp.now().date()]
+                
                 # Category filter
                 categories = ["All"] + sorted(all_data['grouped_category'].dropna().unique())
                 category = st.sidebar.selectbox("Category", categories)
+                
+                # Include transactions with invalid dates option
+                include_invalid_dates = st.sidebar.checkbox("Include transactions with invalid dates", value=True)
+                
                 # Apply filters
-                filtered = all_data[
-                    (all_data['date'] >= pd.to_datetime(date_range[0])) &
-                    (all_data['date'] <= pd.to_datetime(date_range[1]))
-                ]
+                if not valid_dates.empty:
+                    date_filter = (
+                        (all_data['date'] >= pd.to_datetime(date_range[0])) &
+                        (all_data['date'] <= pd.to_datetime(date_range[1]))
+                    )
+                    if include_invalid_dates:
+                        # Include rows with NaT dates
+                        date_filter = date_filter | all_data['date'].isna()
+                    filtered = all_data[date_filter]
+                else:
+                    filtered = all_data
+                
                 if category != "All":
                     filtered = filtered[filtered['grouped_category'] == category]
                 st.subheader("Filtered Transactions")
-                st.dataframe(filtered)
+                st.write(f"Showing {len(filtered)} of {len(all_data)} total transactions")
+                
+                # Always show account breakdown for debugging
+                st.write("**Account breakdown in all_data:**")
+                account_counts = all_data['account'].value_counts()
+                for account, count in account_counts.items():
+                    st.write(f"- {account}: {count} transactions")
+                
+                st.write("**Account breakdown in filtered data:**")
+                filtered_account_counts = filtered['account'].value_counts()
+                for account, count in filtered_account_counts.items():
+                    st.write(f"- {account}: {count} transactions")
+                
+                # Debug info
+                if st.checkbox("Show debug info", value=False):
+                    st.write("**Sample of all_data:**")
+                    st.dataframe(all_data.head(50))
+                    st.write("**Sample of filtered data:**")
+                    st.dataframe(filtered.head(50))
+
+                # Sort by date (most recent first) to show all transactions chronologically
+                filtered_sorted = filtered.sort_values('date', ascending=False, na_position='last')
+                st.dataframe(filtered_sorted, use_container_width=True)
             else:
                 st.subheader("Unified Transactions Table")
                 st.dataframe(all_data)
